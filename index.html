@@ -1,0 +1,1451 @@
+<!DOCTYPE html>
+<html lang="ja" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>SpreadViewer - 見開き画像 & PDF ビューア</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts: Inter & Noto Sans JP -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- JSZip -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <!-- PDF.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'Noto Sans JP', 'sans-serif'],
+                    },
+                    colors: {
+                        darkbg: '#0b0d11',
+                        surface: '#151921',
+                        surfaceHover: '#1f2532',
+                        accent: '#3b82f6',
+                        accentHover: '#2563eb'
+                    }
+                }
+            }
+        };
+    </script>
+
+    <style>
+        /* カスタムスクロールバーと基本レイアウト制御 */
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #0b0d11;
+            color: #f3f4f6;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none; /* ブラウザ標準のピンチやスワイプを抑制 */
+        }
+
+        /* ビューポート・キャンバス領域 */
+        #viewer-viewport {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: grab;
+        }
+
+        #viewer-viewport.is-panning {
+            cursor: grabbing;
+        }
+
+        /* ズーム＆パン対象コンテナ */
+        #spread-container {
+            transform-origin: center center;
+            transition: transform 0.08s cubic-bezier(0.2, 0, 0, 1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            will-change: transform;
+        }
+
+        #spread-container.no-transition {
+            transition: none;
+        }
+
+        /* ページ画像・キャンバス共通スタイル */
+        .page-item {
+            display: block;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.75);
+            background-color: #111;
+            object-fit: contain;
+            pointer-events: none;
+        }
+
+        /* 見開きの中央の綴じ目シャドウ効果 */
+        .spread-shadow-left {
+            box-shadow: inset -12px 0 20px -10px rgba(0,0,0,0.6), -10px 20px 40px rgba(0,0,0,0.7);
+        }
+        .spread-shadow-right {
+            box-shadow: inset 12px 0 20px -10px rgba(0,0,0,0.6), 10px 20px 40px rgba(0,0,0,0.7);
+        }
+
+        /* UIフェードアニメーション */
+        .ui-panel {
+            transition: opacity 0.25s ease, transform 0.25s ease, visibility 0.25s;
+        }
+        .ui-hidden .ui-top {
+            opacity: 0;
+            transform: translateY(-100%);
+            visibility: hidden;
+            pointer-events: none;
+        }
+        .ui-hidden .ui-bottom {
+            opacity: 0;
+            transform: translateY(100%);
+            visibility: hidden;
+            pointer-events: none;
+        }
+        .ui-hidden .nav-zone-hint {
+            opacity: 0 !important;
+        }
+
+        /* カスタムレンジスライダー */
+        input[type=range] {
+            -webkit-appearance: none;
+            background: transparent;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: #3b82f6;
+            cursor: pointer;
+            margin-top: -6px;
+            box-shadow: 0 0 8px rgba(59, 130, 246, 0.8);
+            transition: transform 0.1s;
+        }
+        input[type=range]::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 2px;
+        }
+
+        /* サムネイルドロワー用スクロールバー */
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.05);
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 3px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.35);
+        }
+    </style>
+</head>
+<body class="bg-darkbg text-gray-100 antialiased">
+
+    <!-- 隠しファイル入力 -->
+    <input type="file" id="file-input" accept=".zip,.pdf,application/zip,application/x-zip-compressed,application/pdf" class="hidden">
+
+    <!-- 初期ドロップゾーン / ウェルカム画面 -->
+    <div id="welcome-screen" class="fixed inset-0 z-40 flex flex-col items-center justify-center p-6 bg-darkbg transition-opacity duration-300">
+        <div id="drop-zone" class="w-full max-w-2xl p-8 sm:p-12 rounded-3xl border-2 border-dashed border-gray-700 bg-surface/80 backdrop-blur-md flex flex-col items-center text-center transition-all duration-200 hover:border-accent hover:bg-surfaceHover/60 cursor-pointer shadow-2xl">
+            <div class="w-20 h-20 mb-6 rounded-2xl bg-accent/15 text-accent flex items-center justify-center shadow-inner">
+                <i data-lucide="book-open" class="w-10 h-10"></i>
+            </div>
+            <h1 class="text-2xl sm:text-3xl font-bold tracking-tight text-white mb-3">
+                SpreadViewer
+            </h1>
+            <p class="text-gray-400 text-sm sm:text-base max-w-md mb-8 leading-relaxed">
+                ZIP圧縮された画像ファイルやPDFを、ブラウザ上で高速に見開き表示します。<br>
+                ファイルは外部サーバーに送信されず、ローカルで安全に処理されます。
+            </p>
+            <button id="select-file-btn" class="px-6 py-3.5 rounded-xl bg-accent hover:bg-accentHover text-white font-semibold shadow-lg shadow-accent/25 flex items-center gap-2.5 transition-all active:scale-95">
+                <i data-lucide="folder-open" class="w-5 h-5"></i>
+                <span>ZIP または PDF ファイルを選択</span>
+            </button>
+            <p class="mt-4 text-xs text-gray-500">
+                または、ここにファイルをドラッグ＆ドロップ（対応: .zip, .pdf）
+            </p>
+
+            <!-- 機能バッジ -->
+            <div class="mt-8 pt-6 border-t border-gray-800/80 grid grid-cols-3 gap-4 w-full text-xs text-gray-400">
+                <div class="flex flex-col items-center gap-1.5">
+                    <i data-lucide="columns-2" class="w-4 h-4 text-accent"></i>
+                    <span>右綴じ・左綴じ見開き</span>
+                </div>
+                <div class="flex flex-col items-center gap-1.5">
+                    <i data-lucide="zoom-in" class="w-4 h-4 text-accent"></i>
+                    <span>最大1200%超拡大</span>
+                </div>
+                <div class="flex flex-col items-center gap-1.5">
+                    <i data-lucide="eye-off" class="w-4 h-4 text-accent"></i>
+                    <span>ワンクリックUI非表示</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ドラッグオーバー時のオーバーレイ -->
+    <div id="drag-overlay" class="fixed inset-0 z-50 bg-accent/20 backdrop-blur-sm border-4 border-dashed border-accent flex items-center justify-center pointer-events-none opacity-0 transition-opacity duration-200">
+        <div class="bg-surface px-8 py-6 rounded-2xl shadow-2xl flex flex-col items-center gap-3">
+            <i data-lucide="download" class="w-12 h-12 text-accent animate-bounce"></i>
+            <p class="text-lg font-bold text-white">ドロップしてファイルを読み込む</p>
+        </div>
+    </div>
+
+    <!-- ローディングオーバーレイ -->
+    <div id="loading-overlay" class="fixed inset-0 z-50 bg-darkbg/90 backdrop-blur-md flex flex-col items-center justify-center hidden">
+        <div class="w-14 h-14 border-4 border-accent/30 border-t-accent rounded-full animate-spin mb-4"></div>
+        <p id="loading-text" class="text-base font-medium text-white">ファイルを解析中...</p>
+        <p id="loading-subtext" class="text-xs text-gray-400 mt-1">しばらくお待ちください</p>
+    </div>
+
+    <!-- メインビューア領域 -->
+    <main id="viewer-viewport" class="hidden">
+        <!-- ページクリック判定ゾーン（左右） -->
+        <div id="nav-zone-left" class="fixed top-0 left-0 w-[18%] h-full z-10 cursor-pointer flex items-center justify-start pl-4 group nav-zone-hint" title="左へ移動">
+            <div class="w-10 h-10 rounded-full bg-black/40 backdrop-blur-md border border-white/10 text-white/70 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                <i data-lucide="chevron-left" class="w-6 h-6"></i>
+            </div>
+        </div>
+        <div id="nav-zone-right" class="fixed top-0 right-0 w-[18%] h-full z-10 cursor-pointer flex items-center justify-end pr-4 group nav-zone-hint" title="右へ移動">
+            <div class="w-10 h-10 rounded-full bg-black/40 backdrop-blur-md border border-white/10 text-white/70 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                <i data-lucide="chevron-right" class="w-6 h-6"></i>
+            </div>
+        </div>
+
+        <!-- ズーム・パンされる画像コンテナ -->
+        <div id="spread-container">
+            <!-- JavaScriptで動的にページ要素を挿入 -->
+        </div>
+    </main>
+
+    <!-- UI非表示モード時に常駐する復帰ボタン -->
+    <button id="show-ui-floating-btn" class="fixed top-4 right-4 z-40 p-3 rounded-full bg-black/40 hover:bg-black/80 text-white/60 hover:text-white border border-white/10 backdrop-blur-md shadow-lg transition-all duration-200 hidden" title="UIを表示 (Hキー)">
+        <i data-lucide="eye" class="w-5 h-5"></i>
+    </button>
+
+    <!-- トップツールバー -->
+    <header id="top-bar" class="ui-panel ui-top fixed top-0 left-0 right-0 z-30 bg-surface/85 backdrop-blur-xl border-b border-white/10 px-3 sm:px-5 py-2.5 flex items-center justify-between gap-2 hidden">
+        <!-- 左側：ファイル名＆開くボタン -->
+        <div class="flex items-center gap-2 min-w-0">
+            <button id="open-new-btn" class="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-200 transition flex items-center gap-1.5 text-xs sm:text-sm shrink-0" title="別のファイルを開く">
+                <i data-lucide="folder-open" class="w-4 h-4 text-accent"></i>
+                <span class="hidden md:inline">開く</span>
+            </button>
+            <button id="toggle-thumbnails-btn" class="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-200 transition flex items-center gap-1.5 text-xs sm:text-sm shrink-0" title="ページ一覧 (サムネイル)">
+                <i data-lucide="layout-grid" class="w-4 h-4"></i>
+                <span class="hidden lg:inline">一覧</span>
+            </button>
+            <div class="h-5 w-[1px] bg-white/10 mx-1 hidden sm:block"></div>
+            <h2 id="file-title" class="text-xs sm:text-sm font-medium text-gray-200 truncate max-w-[120px] sm:max-w-[240px] md:max-w-xs" title="">
+                document.zip
+            </h2>
+        </div>
+
+        <!-- 中央：表示モード＆綴じ方向＆表紙設定 -->
+        <div class="flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar">
+            <!-- 見開き / 単ページ 切替 -->
+            <button id="btn-spread-mode" class="px-2.5 py-1.5 rounded-xl bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 text-xs font-medium flex items-center gap-1.5 transition shrink-0" title="見開き / 単ページ切替">
+                <i data-lucide="columns-2" class="w-4 h-4"></i>
+                <span id="label-spread-mode" class="hidden sm:inline">見開き</span>
+            </button>
+
+            <!-- 綴じ方向（右綴じ / 左綴じ） -->
+            <button id="btn-direction" class="px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-200 border border-white/10 text-xs font-medium flex items-center gap-1.5 transition shrink-0" title="読み方向・綴じ方向を切り替え">
+                <i data-lucide="arrow-left-right" class="w-4 h-4 text-emerald-400"></i>
+                <span id="label-direction">右綴じ (←)</span>
+            </button>
+
+            <!-- 表紙単独表示オン/オフ -->
+            <button id="btn-cover-mode" class="px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-200 border border-white/10 text-xs font-medium flex items-center gap-1.5 transition shrink-0" title="1ページ目（表紙）を単独で表示するか切り替え">
+                <i data-lucide="book" class="w-4 h-4 text-amber-400"></i>
+                <span id="label-cover-mode" class="hidden md:inline">表紙単独: ON</span>
+            </button>
+        </div>
+
+        <!-- 右側：フルスクリーン＆UI非表示ボタン -->
+        <div class="flex items-center gap-1.5 shrink-0">
+            <button id="btn-fullscreen" class="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-200 transition" title="全画面表示 (Fキー)">
+                <i data-lucide="maximize" class="w-4 h-4"></i>
+            </button>
+            <button id="btn-hide-ui" class="px-3 py-2 rounded-xl bg-accent hover:bg-accentHover text-white font-medium text-xs flex items-center gap-1.5 shadow-md shadow-accent/20 transition" title="UIを隠して画面を最大化 (Hキー)">
+                <i data-lucide="eye-off" class="w-4 h-4"></i>
+                <span class="hidden sm:inline">UIを隠す</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- ボトムコントロールバー（ページ送り＆拡大縮小） -->
+    <footer id="bottom-bar" class="ui-panel ui-bottom fixed bottom-0 left-0 right-0 z-30 bg-surface/85 backdrop-blur-xl border-t border-white/10 px-4 py-3 flex flex-col gap-2.5 hidden">
+        <!-- 上段：シークバー（スライダー）とページ番号 -->
+        <div class="flex items-center gap-3 w-full max-w-5xl mx-auto">
+            <span id="page-indicator-left" class="text-xs font-mono text-gray-400 w-16 text-right shrink-0">1 / 1</span>
+            <div class="relative flex-1 flex items-center">
+                <input type="range" id="page-slider" min="0" max="0" value="0" class="w-full">
+            </div>
+            <span id="page-indicator-right" class="text-xs font-mono text-gray-300 w-24 shrink-0 text-left">1ページ</span>
+        </div>
+
+        <!-- 下段：ページ移動ボタン＆ズームコントロール -->
+        <div class="flex items-center justify-between w-full max-w-5xl mx-auto gap-2">
+            <!-- ページ送りボタン群 -->
+            <div class="flex items-center gap-1">
+                <button id="btn-first-page" class="p-2 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 transition" title="最初へ">
+                    <i data-lucide="chevrons-left" class="w-4 h-4"></i>
+                </button>
+                <button id="btn-step-left" class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-gray-200 text-xs font-medium flex items-center gap-1 transition" title="左へ進む (←キー)">
+                    <i data-lucide="chevron-left" class="w-4 h-4"></i>
+                    <span id="label-step-left">次へ</span>
+                </button>
+                <button id="btn-step-right" class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-gray-200 text-xs font-medium flex items-center gap-1 transition" title="右へ進む (→キー)">
+                    <span id="label-step-right">前へ</span>
+                    <i data-lucide="chevron-right" class="w-4 h-4"></i>
+                </button>
+                <button id="btn-last-page" class="p-2 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 transition" title="最後へ">
+                    <i data-lucide="chevrons-right" class="w-4 h-4"></i>
+                </button>
+            </div>
+
+            <!-- ズーム＆フィットコントロール -->
+            <div class="flex items-center gap-1 sm:gap-1.5 bg-black/30 p-1 rounded-xl border border-white/5">
+                <!-- フィットモード切替 -->
+                <select id="fit-mode-select" class="bg-transparent text-xs text-gray-200 px-2 py-1 rounded-lg focus:outline-none focus:bg-surface cursor-pointer" title="表示フィット基準">
+                    <option value="contain" class="bg-surface">画面全体フィット</option>
+                    <option value="width" class="bg-surface">横幅に合わせる</option>
+                    <option value="height" class="bg-surface">高さに合わせる</option>
+                    <option value="original" class="bg-surface">原寸大 (100%)</option>
+                </select>
+
+                <div class="h-4 w-[1px] bg-white/10"></div>
+
+                <button id="btn-zoom-out" class="p-1.5 rounded-lg hover:bg-white/10 text-gray-300 transition" title="縮小 (-キー)">
+                    <i data-lucide="zoom-out" class="w-4 h-4"></i>
+                </button>
+                <button id="btn-zoom-reset" class="px-2 py-1 rounded-lg hover:bg-white/10 text-xs font-mono text-accent font-semibold min-w-[54px] text-center transition" title="ズームリセット (0キー)">
+                    100%
+                </button>
+                <button id="btn-zoom-in" class="p-1.5 rounded-lg hover:bg-white/10 text-gray-300 transition" title="超拡大 (+キー)">
+                    <i data-lucide="zoom-in" class="w-4 h-4"></i>
+                </button>
+
+                <!-- ページ送り時ズーム維持トグル -->
+                <button id="btn-keep-zoom" class="hidden sm:flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-gray-400 hover:text-white hover:bg-white/10 transition" title="ページ移動時に拡大率を維持する">
+                    <i data-lucide="lock-open" id="icon-keep-zoom" class="w-3.5 h-3.5"></i>
+                    <span class="hidden md:inline">倍率維持</span>
+                </button>
+            </div>
+        </div>
+    </footer>
+
+    <!-- サムネイル一覧ドロワー -->
+    <aside id="thumbnail-drawer" class="fixed inset-y-0 left-0 z-50 w-72 sm:w-80 bg-surface/95 backdrop-blur-xl border-r border-white/10 shadow-2xl transform -translate-x-full transition-transform duration-300 flex flex-col">
+        <div class="p-4 border-b border-white/10 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+                <i data-lucide="layout-grid" class="w-4 h-4 text-accent"></i>
+                <h3 class="font-semibold text-sm text-white">ページ一覧</h3>
+                <span id="thumb-total-count" class="text-xs text-gray-400 bg-white/5 px-2 py-0.5 rounded-full">0</span>
+            </div>
+            <button id="close-thumbnails-btn" class="p-1.5 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition">
+                <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+        </div>
+        <div id="thumbnail-grid" class="flex-1 overflow-y-auto p-3 grid grid-cols-2 gap-3 custom-scrollbar">
+            <!-- サムネイルアイテムを動的挿入 -->
+        </div>
+    </aside>
+
+    <!-- トースト通知（alert代替） -->
+    <div id="toast-container" class="fixed top-16 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+    <script>
+        // PDF.js ワーカー設定
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        // Lucideアイコン初期化
+        lucide.createIcons();
+
+        /**
+         * アプリケーション状態管理
+         */
+        const state = {
+            fileType: null,         // 'zip' | 'pdf'
+            fileName: '',
+            totalPages: 0,
+            // ZIPの場合: { name, blobUrl, width, height }
+            // PDFの場合: { pageNum, cachedUrl, width, height }
+            pages: [],
+            pdfDoc: null,
+
+            // 表示設定
+            isSpread: true,         // true: 見開き, false: 単ページ
+            direction: 'rtl',       // 'rtl': 右綴じ（日本の漫画）, 'ltr': 左綴じ（洋書・横書き）
+            hasCover: true,         // 見開き時に1ページ目を単独表示するか
+            fitMode: 'contain',     // 'contain' | 'width' | 'height' | 'original'
+            keepZoomOnTurn: false,  // ページ送り時にズームを維持するか
+            uiHidden: false,        // UI非表示モード
+
+            // ナビゲーション状態
+            spreads: [],            // 見開きグループ配列 例: [[0], [1, 2], [3, 4]]
+            currentSpreadIndex: 0,
+
+            // ズーム＆パン状態
+            scale: 1.0,
+            minScale: 0.25,
+            maxScale: 12.0,         // 最大1200%まで拡大可能
+            translateX: 0,
+            translateY: 0,
+            isPanning: false,
+            startPanX: 0,
+            startPanY: 0,
+            hasMovedDuringPan: false,
+
+            // タッチピンチ用
+            initialPinchDist: 0,
+            initialPinchScale: 1.0,
+            lastTapTime: 0
+        };
+
+        // DOM要素キャッシュ
+        const els = {
+            fileInput: document.getElementById('file-input'),
+            welcomeScreen: document.getElementById('welcome-screen'),
+            dropZone: document.getElementById('drop-zone'),
+            selectFileBtn: document.getElementById('select-file-btn'),
+            dragOverlay: document.getElementById('drag-overlay'),
+            loadingOverlay: document.getElementById('loading-overlay'),
+            loadingText: document.getElementById('loading-text'),
+            loadingSubtext: document.getElementById('loading-subtext'),
+
+            viewport: document.getElementById('viewer-viewport'),
+            spreadContainer: document.getElementById('spread-container'),
+            navZoneLeft: document.getElementById('nav-zone-left'),
+            navZoneRight: document.getElementById('nav-zone-right'),
+
+            topBar: document.getElementById('top-bar'),
+            bottomBar: document.getElementById('bottom-bar'),
+            showUiFloatingBtn: document.getElementById('show-ui-floating-btn'),
+            fileTitle: document.getElementById('file-title'),
+
+            btnSpreadMode: document.getElementById('btn-spread-mode'),
+            labelSpreadMode: document.getElementById('label-spread-mode'),
+            btnDirection: document.getElementById('btn-direction'),
+            labelDirection: document.getElementById('label-direction'),
+            btnCoverMode: document.getElementById('btn-cover-mode'),
+            labelCoverMode: document.getElementById('label-cover-mode'),
+            btnFullscreen: document.getElementById('btn-fullscreen'),
+            btnHideUi: document.getElementById('btn-hide-ui'),
+
+            pageSlider: document.getElementById('page-slider'),
+            pageIndicatorLeft: document.getElementById('page-indicator-left'),
+            pageIndicatorRight: document.getElementById('page-indicator-right'),
+            btnFirstPage: document.getElementById('btn-first-page'),
+            btnStepLeft: document.getElementById('btn-step-left'),
+            labelStepLeft: document.getElementById('label-step-left'),
+            btnStepRight: document.getElementById('btn-step-right'),
+            labelStepRight: document.getElementById('label-step-right'),
+            btnLastPage: document.getElementById('btn-last-page'),
+
+            fitModeSelect: document.getElementById('fit-mode-select'),
+            btnZoomOut: document.getElementById('btn-zoom-out'),
+            btnZoomReset: document.getElementById('btn-zoom-reset'),
+            btnZoomIn: document.getElementById('btn-zoom-in'),
+            btnKeepZoom: document.getElementById('btn-keep-zoom'),
+            iconKeepZoom: document.getElementById('icon-keep-zoom'),
+
+            openNewBtn: document.getElementById('open-new-btn'),
+            toggleThumbnailsBtn: document.getElementById('toggle-thumbnails-btn'),
+            thumbnailDrawer: document.getElementById('thumbnail-drawer'),
+            closeThumbnailsBtn: document.getElementById('close-thumbnails-btn'),
+            thumbnailGrid: document.getElementById('thumbnail-grid'),
+            thumbTotalCount: document.getElementById('thumb-total-count'),
+            toastContainer: document.getElementById('toast-container')
+        };
+
+        /**
+         * トースト通知を表示（alertの代替）
+         */
+        function showToast(message, type = 'info') {
+            const toast = document.createElement('div');
+            const bgClass = type === 'error' ? 'bg-red-600/90 border-red-400/30' : 'bg-surface/95 border-white/15';
+            toast.className = `${bgClass} backdrop-blur-md text-white text-xs sm:text-sm px-4 py-2.5 rounded-xl border shadow-xl transition-all duration-300 opacity-0 translate-y-2`;
+            toast.textContent = message;
+            els.toastContainer.appendChild(toast);
+
+            requestAnimationFrame(() => {
+                toast.classList.remove('opacity-0', 'translate-y-2');
+            });
+
+            setTimeout(() => {
+                toast.classList.add('opacity-0', '-translate-y-2');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        /**
+         * ローディング表示制御
+         */
+        function setLoading(isLoading, text = '', subtext = '') {
+            if (isLoading) {
+                els.loadingText.textContent = text;
+                els.loadingSubtext.textContent = subtext;
+                els.loadingOverlay.classList.remove('hidden');
+            } else {
+                els.loadingOverlay.classList.add('hidden');
+            }
+        }
+
+        /**
+         * 自然順ソート（例: page2.jpg が page10.jpg より前に来るようにする）
+         */
+        const naturalCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+        function naturalSort(a, b) {
+            return naturalCollator.compare(a, b);
+        }
+
+        /**
+         * 以前のリソース（Blob URL等）を解放
+         */
+        function cleanupPreviousDocument() {
+            state.pages.forEach(p => {
+                if (p.blobUrl) URL.revokeObjectURL(p.blobUrl);
+                if (p.cachedUrl) URL.revokeObjectURL(p.cachedUrl);
+                if (p.thumbUrl) URL.revokeObjectURL(p.thumbUrl);
+            });
+            state.pages = [];
+            state.pdfDoc = null;
+            state.totalPages = 0;
+            state.spreads = [];
+            state.currentSpreadIndex = 0;
+            els.thumbnailGrid.innerHTML = '';
+        }
+
+        /**
+         * ファイル読み込みメインハンドラ
+         */
+        async function handleFile(file) {
+            if (!file) return;
+            const fileName = file.name;
+            const lowerName = fileName.toLowerCase();
+
+            if (!lowerName.endsWith('.zip') && !lowerName.endsWith('.pdf')) {
+                showToast('対応しているファイル形式は .zip または .pdf のみです。', 'error');
+                return;
+            }
+
+            cleanupPreviousDocument();
+            state.fileName = fileName;
+            els.fileTitle.textContent = fileName;
+            els.fileTitle.title = fileName;
+
+            try {
+                if (lowerName.endsWith('.zip')) {
+                    await loadZipFile(file);
+                } else if (lowerName.endsWith('.pdf')) {
+                    await loadPdfFile(file);
+                }
+
+                if (state.totalPages === 0) {
+                    showToast('表示可能な画像またはページが見つかりませんでした。', 'error');
+                    setLoading(false);
+                    return;
+                }
+
+                // UIをビューアモードへ切り替え
+                els.welcomeScreen.classList.add('hidden');
+                els.viewport.classList.remove('hidden');
+                els.topBar.classList.remove('hidden');
+                els.bottomBar.classList.remove('hidden');
+
+                buildSpreads();
+                state.currentSpreadIndex = 0;
+                resetZoomAndPan(false);
+                await renderCurrentSpread();
+                buildThumbnails();
+                updateControlLabels();
+
+                showToast(`「${fileName}」を読み込みました（全${state.totalPages}ページ）`);
+            } catch (err) {
+                console.error(err);
+                showToast(`ファイルの読み込み中にエラーが発生しました: ${err.message}`, 'error');
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        /**
+         * ZIPファイルの解凍と画像抽出
+         */
+        async function loadZipFile(file) {
+            setLoading(true, 'ZIPファイルを解凍中...', 'アーカイブ内の画像を検索しています');
+            state.fileType = 'zip';
+
+            const zip = await JSZip.loadAsync(file);
+            const imageExtensions = /\.(jpe?g|png|webp|gif|bmp|avif)$/i;
+            const validEntries = [];
+
+            zip.forEach((relativePath, zipEntry) => {
+                // ディレクトリ、macOSメタデータ(__MACOSX)、ドットから始まる隠しファイルを除外
+                if (zipEntry.dir) return;
+                if (relativePath.includes('__MACOSX/')) return;
+                const baseName = relativePath.split('/').pop();
+                if (baseName.startsWith('.')) return;
+
+                if (imageExtensions.test(baseName)) {
+                    validEntries.push(zipEntry);
+                }
+            });
+
+            // パス全体で自然順ソート
+            validEntries.sort((a, b) => naturalSort(a.name, b.name));
+
+            state.totalPages = validEntries.length;
+            for (let i = 0; i < validEntries.length; i++) {
+                setLoading(true, '画像を展開中...', `${i + 1} / ${validEntries.length} ページ`);
+                const entry = validEntries[i];
+                const blob = await entry.async('blob');
+                const blobUrl = URL.createObjectURL(blob);
+                state.pages.push({
+                    index: i,
+                    name: entry.name,
+                    blobUrl: blobUrl,
+                    width: 0,
+                    height: 0
+                });
+            }
+        }
+
+        /**
+         * PDFファイルの読み込み初期化
+         */
+        async function loadPdfFile(file) {
+            setLoading(true, 'PDFファイルを解析中...', 'ドキュメント構造を読み込んでいます');
+            state.fileType = 'pdf';
+
+            const arrayBuffer = await file.arrayBuffer();
+            const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+            const pdfDoc = await loadingTask.promise;
+
+            state.pdfDoc = pdfDoc;
+            state.totalPages = pdfDoc.numPages;
+
+            for (let i = 1; i <= pdfDoc.numPages; i++) {
+                state.pages.push({
+                    index: i - 1,
+                    pageNum: i,
+                    cachedUrl: null,
+                    thumbUrl: null,
+                    width: 0,
+                    height: 0
+                });
+            }
+        }
+
+        /**
+         * 指定ページの画像URLを取得（PDFの場合は高解像度レンダリングしてキャッシュ）
+         */
+        async function getPageImageUrl(pageIndex) {
+            const pageObj = state.pages[pageIndex];
+            if (!pageObj) return null;
+
+            if (state.fileType === 'zip') {
+                return pageObj.blobUrl;
+            }
+
+            // PDFの場合：既に高解像度レンダリング済みならそれを返す
+            if (pageObj.cachedUrl) {
+                return pageObj.cachedUrl;
+            }
+
+            const pdfPage = await state.pdfDoc.getPage(pageObj.pageNum);
+            // 超拡大でも鮮明に見えるよう高スケール（2.5x〜3.0x）でレンダリング
+            const renderScale = 2.8;
+            const viewport = pdfPage.getViewport({ scale: renderScale });
+
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+
+            await pdfPage.render({
+                canvasContext: ctx,
+                viewport: viewport
+            }).promise;
+
+            return new Promise((resolve) => {
+                canvas.toBlob((blob) => {
+                    const url = URL.createObjectURL(blob);
+                    pageObj.cachedUrl = url;
+                    pageObj.width = viewport.width;
+                    pageObj.height = viewport.height;
+                    resolve(url);
+                }, 'image/webp', 0.92);
+            });
+        }
+
+        /**
+         * 見開きページ構成の計算
+         */
+        function buildSpreads() {
+            const total = state.totalPages;
+            const spreads = [];
+
+            if (!state.isSpread) {
+                // 単ページモード
+                for (let i = 0; i < total; i++) {
+                    spreads.push([i]);
+                }
+            } else {
+                // 見開きモード
+                let i = 0;
+                if (state.hasCover && total > 0) {
+                    spreads.push([0]);
+                    i = 1;
+                }
+                while (i < total) {
+                    if (i + 1 < total) {
+                        spreads.push([i, i + 1]);
+                        i += 2;
+                    } else {
+                        spreads.push([i]);
+                        i += 1;
+                    }
+                }
+            }
+
+            state.spreads = spreads;
+            els.pageSlider.max = Math.max(0, spreads.length - 1);
+        }
+
+        /**
+         * 現在表示中のページインデックスを取得（モード切替時の位置維持用）
+         */
+        function getCurrentFirstPageIndex() {
+            const currentGroup = state.spreads[state.currentSpreadIndex];
+            return currentGroup ? currentGroup[0] : 0;
+        }
+
+        /**
+         * 指定したページインデックスを含む見開きインデックスへジャンプ
+         */
+        function jumpToPageIndex(pageIdx) {
+            const targetIdx = state.spreads.findIndex(group => group.includes(pageIdx));
+            state.currentSpreadIndex = targetIdx >= 0 ? targetIdx : 0;
+            if (!state.keepZoomOnTurn) {
+                resetZoomAndPan(false);
+            }
+            renderCurrentSpread();
+        }
+
+        /**
+         * 現在の見開きページをDOMに描画
+         */
+        async function renderCurrentSpread() {
+            if (state.spreads.length === 0) return;
+
+            const group = state.spreads[state.currentSpreadIndex];
+            if (!group) return;
+
+            // PDF未キャッシュページが含まれる場合のみ軽いローディング表示
+            const needsPdfRender = state.fileType === 'pdf' && group.some(idx => !state.pages[idx].cachedUrl);
+            if (needsPdfRender) {
+                setLoading(true, '高解像度ページを生成中...', `ページ ${group.map(i => i + 1).join(' - ')}`);
+            }
+
+            try {
+                // 画像URLを並列取得
+                const urls = await Promise.all(group.map(idx => getPageImageUrl(idx)));
+
+                els.spreadContainer.innerHTML = '';
+
+                // 表示順序の決定（右綴じなら [次ページ, 前ページ] の順で左から並べる）
+                let displayItems = group.map((pageIdx, i) => ({
+                    pageIdx,
+                    url: urls[i]
+                }));
+
+                if (displayItems.length === 2 && state.direction === 'rtl') {
+                    displayItems.reverse();
+                }
+
+                const isDual = displayItems.length === 2;
+
+                displayItems.forEach((item, posIndex) => {
+                    const img = document.createElement('img');
+                    img.src = item.url;
+                    img.alt = `Page ${item.pageIdx + 1}`;
+                    img.draggable = false;
+                    img.className = 'page-item';
+
+                    // 見開き時の綴じ目シャドウ
+                    if (isDual) {
+                        img.classList.add(posIndex === 0 ? 'spread-shadow-left' : 'spread-shadow-right');
+                    }
+
+                    // フィットモードに応じたサイズスタイル適用
+                    applyFitStyleToImage(img, isDual);
+
+                    els.spreadContainer.appendChild(img);
+                });
+
+                // 先読みキャッシュ（PDFの場合、次の見開きをバックグラウンドでレンダリング）
+                preloadNextSpread();
+
+                updateNavigationUI();
+            } finally {
+                if (needsPdfRender) {
+                    setLoading(false);
+                }
+            }
+        }
+
+        /**
+         * フィットモードに応じた画像サイズ計算
+         */
+        function applyFitStyleToImage(img, isDual) {
+            // UI非表示時は画面100%をフル活用、UI表示時は上下バーを考慮しつつ最大限広く取る
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            const maxPageWidth = isDual ? vw / 2 : vw;
+
+            img.style.maxWidth = '';
+            img.style.maxHeight = '';
+            img.style.width = '';
+            img.style.height = '';
+
+            switch (state.fitMode) {
+                case 'contain':
+                    img.style.maxWidth = `${maxPageWidth}px`;
+                    img.style.maxHeight = `${vh}px`;
+                    img.style.width = 'auto';
+                    img.style.height = 'auto';
+                    break;
+                case 'width':
+                    img.style.width = `${maxPageWidth}px`;
+                    img.style.height = 'auto';
+                    break;
+                case 'height':
+                    img.style.height = `${vh}px`;
+                    img.style.width = 'auto';
+                    break;
+                case 'original':
+                    // 原寸大（naturalWidthそのまま）
+                    img.style.maxWidth = 'none';
+                    img.style.maxHeight = 'none';
+                    break;
+            }
+        }
+
+        /**
+         * 次の見開きページをバックグラウンド先読み（PDF用）
+         */
+        function preloadNextSpread() {
+            if (state.fileType !== 'pdf') return;
+            const nextIdx = state.currentSpreadIndex + 1;
+            if (nextIdx < state.spreads.length) {
+                const nextGroup = state.spreads[nextIdx];
+                nextGroup.forEach(pIdx => {
+                    if (!state.pages[pIdx].cachedUrl) {
+                        getPageImageUrl(pIdx).catch(() => {});
+                    }
+                });
+            }
+        }
+
+        /**
+         * スライダー・ページ番号・サムネイルハイライトの更新
+         */
+        function updateNavigationUI() {
+            const totalSpreads = state.spreads.length;
+            const currentIdx = state.currentSpreadIndex;
+            const group = state.spreads[currentIdx] || [0];
+
+            // スライダー同期（右綴じでも直感的に操作できるようスライダー値同期）
+            els.pageSlider.value = currentIdx;
+
+            // ページ番号表示
+            const pageLabel = group.map(i => i + 1).join(' - ');
+            els.pageIndicatorLeft.textContent = `${currentIdx + 1} / ${totalSpreads}`;
+            els.pageIndicatorRight.textContent = `P.${pageLabel} / ${state.totalPages}`;
+
+            // サムネイル内のアクティブ枠更新
+            const activeSet = new Set(group);
+            document.querySelectorAll('.thumb-card').forEach(card => {
+                const pIdx = parseInt(card.dataset.pageIndex, 10);
+                if (activeSet.has(pIdx)) {
+                    card.classList.add('ring-2', 'ring-accent', 'bg-accent/15');
+                } else {
+                    card.classList.remove('ring-2', 'ring-accent', 'bg-accent/15');
+                }
+            });
+        }
+
+        /**
+         * コントロールボタンのラベル更新
+         */
+        function updateControlLabels() {
+            // 見開き/単ページ
+            els.labelSpreadMode.textContent = state.isSpread ? '見開き' : '単ページ';
+            els.btnSpreadMode.className = state.isSpread
+                ? 'px-2.5 py-1.5 rounded-xl bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 text-xs font-medium flex items-center gap-1.5 transition shrink-0'
+                : 'px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-200 border border-white/10 text-xs font-medium flex items-center gap-1.5 transition shrink-0';
+
+            // 綴じ方向
+            if (state.direction === 'rtl') {
+                els.labelDirection.textContent = '右綴じ (←)';
+                els.labelStepLeft.textContent = '次へ';
+                els.labelStepRight.textContent = '前へ';
+            } else {
+                els.labelDirection.textContent = '左綴じ (→)';
+                els.labelStepLeft.textContent = '前へ';
+                els.labelStepRight.textContent = '次へ';
+            }
+
+            // 表紙単独設定
+            els.labelCoverMode.textContent = `表紙単独: ${state.hasCover ? 'ON' : 'OFF'}`;
+            els.btnCoverMode.style.opacity = state.isSpread ? '1' : '0.45';
+            els.btnCoverMode.disabled = !state.isSpread;
+
+            // 倍率維持ボタン
+            if (state.keepZoomOnTurn) {
+                els.btnKeepZoom.classList.add('text-accent', 'bg-accent/15');
+                els.btnKeepZoom.classList.remove('text-gray-400');
+                els.iconKeepZoom.setAttribute('data-lucide', 'lock');
+            } else {
+                els.btnKeepZoom.classList.remove('text-accent', 'bg-accent/15');
+                els.btnKeepZoom.classList.add('text-gray-400');
+                els.iconKeepZoom.setAttribute('data-lucide', 'lock-open');
+            }
+            lucide.createIcons();
+        }
+
+        /**
+         * ページ送りロジック
+         */
+        function goToSpread(newIndex) {
+            const clamped = Math.max(0, Math.min(state.spreads.length - 1, newIndex));
+            if (clamped === state.currentSpreadIndex) {
+                if (clamped === 0) showToast('最初のページです');
+                if (clamped === state.spreads.length - 1) showToast('最後のページです');
+                return;
+            }
+            state.currentSpreadIndex = clamped;
+            if (!state.keepZoomOnTurn) {
+                resetZoomAndPan(false);
+            }
+            renderCurrentSpread();
+        }
+
+        function stepLeft() {
+            // 右綴じなら左へ進む＝次のページ、左綴じなら前のページ
+            if (state.direction === 'rtl') {
+                goToSpread(state.currentSpreadIndex + 1);
+            } else {
+                goToSpread(state.currentSpreadIndex - 1);
+            }
+        }
+
+        function stepRight() {
+            // 右綴じなら右へ進む＝前のページ、左綴じなら次のページ
+            if (state.direction === 'rtl') {
+                goToSpread(state.currentSpreadIndex - 1);
+            } else {
+                goToSpread(state.currentSpreadIndex + 1);
+            }
+        }
+
+        /**
+         * ズーム＆パン変換の適用
+         */
+        function applyTransform(animate = true) {
+            if (animate) {
+                els.spreadContainer.classList.remove('no-transition');
+            } else {
+                els.spreadContainer.classList.add('no-transition');
+            }
+
+            els.spreadContainer.style.transform = `translate3d(${state.translateX}px, ${state.translateY}px, 0) scale(${state.scale})`;
+            els.btnZoomReset.textContent = `${Math.round(state.scale * 100)}%`;
+
+            // 拡大中は左右クリックゾーンの誤爆を防ぐため無効化
+            const isZoomed = state.scale > 1.02;
+            els.navZoneLeft.style.pointerEvents = isZoomed ? 'none' : 'auto';
+            els.navZoneRight.style.pointerEvents = isZoomed ? 'none' : 'auto';
+        }
+
+        /**
+         * ズームと位置を初期状態にリセット
+         */
+        function resetZoomAndPan(animate = true) {
+            state.scale = 1.0;
+            state.translateX = 0;
+            state.translateY = 0;
+            applyTransform(animate);
+        }
+
+        /**
+         * 指定座標（カーソル位置など）を中心にしてズームする
+         */
+        function zoomAtPoint(newScale, clientX, clientY, animate = true) {
+            const clampedScale = Math.max(state.minScale, Math.min(state.maxScale, newScale));
+            if (clampedScale === state.scale) return;
+
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+
+            // 画面中央からのオフセット
+            const originX = clientX - vw / 2;
+            const originY = clientY - vh / 2;
+
+            const ratio = clampedScale / state.scale;
+            state.translateX = originX - (originX - state.translateX) * ratio;
+            state.translateY = originY - (originY - state.translateY) * ratio;
+            state.scale = clampedScale;
+
+            // 1.0倍付近に近づいたら中央にスナップ
+            if (Math.abs(state.scale - 1.0) < 0.04) {
+                state.scale = 1.0;
+                state.translateX = 0;
+                state.translateY = 0;
+            }
+
+            applyTransform(animate);
+        }
+
+        /**
+         * UI表示・非表示の切り替え（フル没入モード）
+         */
+        function toggleUIVisibility(forceState = null) {
+            state.uiHidden = forceState !== null ? forceState : !state.uiHidden;
+            if (state.uiHidden) {
+                document.body.classList.add('ui-hidden');
+                els.showUiFloatingBtn.classList.remove('hidden');
+            } else {
+                document.body.classList.remove('ui-hidden');
+                els.showUiFloatingBtn.classList.add('hidden');
+            }
+        }
+
+        /**
+         * フルスクリーン切替
+         */
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().catch(() => {
+                    showToast('フルスクリーン表示がブロックされました', 'error');
+                });
+            } else {
+                document.exitFullscreen().catch(() => {});
+            }
+        }
+
+        /**
+         * サムネイル一覧の生成（遅延レンダリング対応）
+         */
+        function buildThumbnails() {
+            els.thumbTotalCount.textContent = `${state.totalPages}P`;
+            els.thumbnailGrid.innerHTML = '';
+
+            const observer = new IntersectionObserver((entries, obs) => {
+                entries.forEach(async (entry) => {
+                    if (!entry.isIntersecting) return;
+                    const card = entry.target;
+                    const pageIdx = parseInt(card.dataset.pageIndex, 10);
+                    const imgEl = card.querySelector('img');
+                    if (imgEl && !imgEl.src) {
+                        const thumbUrl = await getThumbnailUrl(pageIdx);
+                        if (thumbUrl) imgEl.src = thumbUrl;
+                    }
+                    obs.unobserve(card);
+                });
+            }, { root: els.thumbnailGrid, rootMargin: '200px' });
+
+            state.pages.forEach((page, idx) => {
+                const card = document.createElement('button');
+                card.dataset.pageIndex = idx;
+                card.className = 'thumb-card group flex flex-col items-center p-2 rounded-xl bg-white/5 hover:bg-white/10 transition text-left focus:outline-none';
+
+                const imgWrapper = document.createElement('div');
+                imgWrapper.className = 'w-full aspect-[3/4] bg-black/50 rounded-lg overflow-hidden flex items-center justify-center mb-1.5 border border-white/5';
+
+                const img = document.createElement('img');
+                img.className = 'w-full h-full object-contain transition-transform duration-200 group-hover:scale-105';
+                img.alt = `Page ${idx + 1}`;
+                imgWrapper.appendChild(img);
+
+                const label = document.createElement('span');
+                label.className = 'text-xs font-mono text-gray-300';
+                label.textContent = `${idx + 1}`;
+
+                card.appendChild(imgWrapper);
+                card.appendChild(label);
+
+                card.addEventListener('click', () => {
+                    jumpToPageIndex(idx);
+                    if (window.innerWidth < 768) {
+                        toggleThumbnailDrawer(false);
+                    }
+                });
+
+                els.thumbnailGrid.appendChild(card);
+                observer.observe(card);
+            });
+
+            updateNavigationUI();
+        }
+
+        /**
+         * サムネイル用軽量画像URL取得
+         */
+        async function getThumbnailUrl(pageIndex) {
+            const pageObj = state.pages[pageIndex];
+            if (!pageObj) return null;
+
+            if (state.fileType === 'zip') {
+                return pageObj.blobUrl;
+            }
+            if (pageObj.thumbUrl) return pageObj.thumbUrl;
+            if (pageObj.cachedUrl) return pageObj.cachedUrl;
+
+            const pdfPage = await state.pdfDoc.getPage(pageObj.pageNum);
+            const viewport = pdfPage.getViewport({ scale: 0.4 });
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+
+            await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+            return new Promise((resolve) => {
+                canvas.toBlob((blob) => {
+                    const url = URL.createObjectURL(blob);
+                    pageObj.thumbUrl = url;
+                    resolve(url);
+                }, 'image/jpeg', 0.75);
+            });
+        }
+
+        function toggleThumbnailDrawer(open = null) {
+            const isOpen = !els.thumbnailDrawer.classList.contains('-translate-x-full');
+            const shouldOpen = open !== null ? open : !isOpen;
+            if (shouldOpen) {
+                els.thumbnailDrawer.classList.remove('-translate-x-full');
+            } else {
+                els.thumbnailDrawer.classList.add('-translate-x-full');
+            }
+        }
+
+        // ==========================================
+        // イベントリスナー登録
+        // ==========================================
+
+        // ファイル選択・ドロップ
+        els.selectFileBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            els.fileInput.click();
+        });
+        els.dropZone.addEventListener('click', () => els.fileInput.click());
+        els.openNewBtn.addEventListener('click', () => els.fileInput.click());
+
+        els.fileInput.addEventListener('change', (e) => {
+            if (e.target.files && e.target.files[0]) {
+                handleFile(e.target.files[0]);
+                e.target.value = '';
+            }
+        });
+
+        // 画面全体へのドラッグ＆ドロップ対応
+        let dragCounter = 0;
+        window.addEventListener('dragenter', (e) => {
+            e.preventDefault();
+            dragCounter++;
+            els.dragOverlay.classList.remove('opacity-0');
+        });
+        window.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            dragCounter--;
+            if (dragCounter <= 0) {
+                dragCounter = 0;
+                els.dragOverlay.classList.add('opacity-0');
+            }
+        });
+        window.addEventListener('dragover', (e) => e.preventDefault());
+        window.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dragCounter = 0;
+            els.dragOverlay.classList.add('opacity-0');
+            if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                handleFile(e.dataTransfer.files[0]);
+            }
+        });
+
+        // 見開き・単ページ切替
+        els.btnSpreadMode.addEventListener('click', () => {
+            const currentPage = getCurrentFirstPageIndex();
+            state.isSpread = !state.isSpread;
+            buildSpreads();
+            jumpToPageIndex(currentPage);
+            updateControlLabels();
+        });
+
+        // 綴じ方向切替
+        els.btnDirection.addEventListener('click', () => {
+            state.direction = state.direction === 'rtl' ? 'ltr' : 'rtl';
+            updateControlLabels();
+            renderCurrentSpread();
+            showToast(state.direction === 'rtl' ? '右綴じ（←方向）に切り替えました' : '左綴じ（→方向）に切り替えました');
+        });
+
+        // 表紙単独表示切替
+        els.btnCoverMode.addEventListener('click', () => {
+            if (!state.isSpread) return;
+            const currentPage = getCurrentFirstPageIndex();
+            state.hasCover = !state.hasCover;
+            buildSpreads();
+            jumpToPageIndex(currentPage);
+            updateControlLabels();
+        });
+
+        // UI表示/非表示切替
+        els.btnHideUi.addEventListener('click', () => toggleUIVisibility(true));
+        els.showUiFloatingBtn.addEventListener('click', () => toggleUIVisibility(false));
+
+        // フルスクリーン
+        els.btnFullscreen.addEventListener('click', toggleFullscreen);
+
+        // サムネイルドロワー
+        els.toggleThumbnailsBtn.addEventListener('click', () => toggleThumbnailDrawer());
+        els.closeThumbnailsBtn.addEventListener('click', () => toggleThumbnailDrawer(false));
+
+        // ページ送りボタン＆左右ゾーンクリック
+        els.btnStepLeft.addEventListener('click', stepLeft);
+        els.btnStepRight.addEventListener('click', stepRight);
+        els.navZoneLeft.addEventListener('click', stepLeft);
+        els.navZoneRight.addEventListener('click', stepRight);
+
+        els.btnFirstPage.addEventListener('click', () => goToSpread(0));
+        els.btnLastPage.addEventListener('click', () => goToSpread(state.spreads.length - 1));
+
+        // スライダー操作
+        els.pageSlider.addEventListener('input', (e) => {
+            const idx = parseInt(e.target.value, 10);
+            goToSpread(idx);
+        });
+
+        // フィットモード変更
+        els.fitModeSelect.addEventListener('change', (e) => {
+            state.fitMode = e.target.value;
+            resetZoomAndPan(false);
+            renderCurrentSpread();
+        });
+
+        // ズームボタン群
+        els.btnZoomIn.addEventListener('click', () => {
+            zoomAtPoint(state.scale * 1.4, window.innerWidth / 2, window.innerHeight / 2);
+        });
+        els.btnZoomOut.addEventListener('click', () => {
+            zoomAtPoint(state.scale / 1.4, window.innerWidth / 2, window.innerHeight / 2);
+        });
+        els.btnZoomReset.addEventListener('click', () => resetZoomAndPan(true));
+
+        els.btnKeepZoom.addEventListener('click', () => {
+            state.keepZoomOnTurn = !state.keepZoomOnTurn;
+            updateControlLabels();
+        });
+
+        // マウスホイールでのシームレスズーム
+        els.viewport.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const zoomFactor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+            zoomAtPoint(state.scale * zoomFactor, e.clientX, e.clientY, false);
+        }, { passive: false });
+
+        // ダブルクリックで超拡大 / リセット切替
+        els.viewport.addEventListener('dblclick', (e) => {
+            if (state.scale > 1.05) {
+                resetZoomAndPan(true);
+            } else {
+                zoomAtPoint(2.8, e.clientX, e.clientY, true);
+            }
+        });
+
+        // マウスドラッグでのパン（移動）
+        els.viewport.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            state.isPanning = true;
+            state.hasMovedDuringPan = false;
+            state.startPanX = e.clientX - state.translateX;
+            state.startPanY = e.clientY - state.translateY;
+            els.viewport.classList.add('is-panning');
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!state.isPanning) return;
+            const dx = e.clientX - state.startPanX;
+            const dy = e.clientY - state.startPanY;
+            if (Math.abs(dx - state.translateX) > 3 || Math.abs(dy - state.translateY) > 3) {
+                state.hasMovedDuringPan = true;
+            }
+            state.translateX = dx;
+            state.translateY = dy;
+            applyTransform(false);
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (state.isPanning) {
+                state.isPanning = false;
+                els.viewport.classList.remove('is-panning');
+            }
+        });
+
+        // タッチ操作（1本指パン・スワイプ / 2本指ピンチズーム / ダブルタップ）
+        let touchStartX = 0;
+        let touchStartY = 0;
+
+        els.viewport.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 1) {
+                const touch = e.touches[0];
+                touchStartX = touch.clientX;
+                touchStartY = touch.clientY;
+                state.isPanning = true;
+                state.startPanX = touch.clientX - state.translateX;
+                state.startPanY = touch.clientY - state.translateY;
+
+                // ダブルタップ検出
+                const now = Date.now();
+                if (now - state.lastTapTime < 280) {
+                    if (state.scale > 1.05) {
+                        resetZoomAndPan(true);
+                    } else {
+                        zoomAtPoint(2.8, touch.clientX, touch.clientY, true);
+                    }
+                }
+                state.lastTapTime = now;
+            } else if (e.touches.length === 2) {
+                state.isPanning = false;
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                state.initialPinchDist = Math.hypot(dx, dy);
+                state.initialPinchScale = state.scale;
+            }
+        }, { passive: false });
+
+        els.viewport.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            if (e.touches.length === 1 && state.isPanning && state.scale > 1.02) {
+                const touch = e.touches[0];
+                state.translateX = touch.clientX - state.startPanX;
+                state.translateY = touch.clientY - state.startPanY;
+                applyTransform(false);
+            } else if (e.touches.length === 2 && state.initialPinchDist > 0) {
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                const dist = Math.hypot(dx, dy);
+                const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                const newScale = state.initialPinchScale * (dist / state.initialPinchDist);
+                zoomAtPoint(newScale, midX, midY, false);
+            }
+        }, { passive: false });
+
+        els.viewport.addEventListener('touchend', (e) => {
+            if (e.changedTouches.length === 1 && state.scale <= 1.02 && state.isPanning) {
+                // 等倍時の横スワイプでページ送り
+                const touch = e.changedTouches[0];
+                const diffX = touch.clientX - touchStartX;
+                const diffY = touch.clientY - touchStartY;
+                if (Math.abs(diffX) > 50 && Math.abs(diffX) > Math.abs(diffY) * 1.5) {
+                    if (diffX > 0) {
+                        stepLeft(); // 右へスワイプ＝左側のページへ
+                    } else {
+                        stepRight(); // 左へスワイプ＝右側のページへ
+                    }
+                }
+            }
+            if (e.touches.length === 0) {
+                state.isPanning = false;
+                state.initialPinchDist = 0;
+            }
+        });
+
+        // キーボードショートカット
+        window.addEventListener('keydown', (e) => {
+            if (state.totalPages === 0) return;
+
+            switch (e.key) {
+                case 'ArrowLeft':
+                    e.preventDefault();
+                    stepLeft();
+                    break;
+                case 'ArrowRight':
+                    e.preventDefault();
+                    stepRight();
+                    break;
+                case ' ':
+                    e.preventDefault();
+                    if (e.shiftKey) {
+                        goToSpread(state.currentSpreadIndex - 1);
+                    } else {
+                        goToSpread(state.currentSpreadIndex + 1);
+                    }
+                    break;
+                case 'h':
+                case 'H':
+                    toggleUIVisibility();
+                    break;
+                case 'f':
+                case 'F':
+                    toggleFullscreen();
+                    break;
+                case '+':
+                case '=':
+                case ';':
+                    zoomAtPoint(state.scale * 1.35, window.innerWidth / 2, window.innerHeight / 2);
+                    break;
+                case '-':
+                case '_':
+                    zoomAtPoint(state.scale / 1.35, window.innerWidth / 2, window.innerHeight / 2);
+                    break;
+                case '0':
+                    resetZoomAndPan(true);
+                    break;
+                case 'Escape':
+                    if (!els.thumbnailDrawer.classList.contains('-translate-x-full')) {
+                        toggleThumbnailDrawer(false);
+                    } else if (state.uiHidden) {
+                        toggleUIVisibility(false);
+                    }
+                    break;
+            }
+        });
+
+        // ウィンドウリサイズ時に画像フィットサイズを再計算
+        window.addEventListener('resize', () => {
+            if (state.totalPages > 0) {
+                const imgs = els.spreadContainer.querySelectorAll('.page-item');
+                const isDual = imgs.length === 2;
+                imgs.forEach(img => applyFitStyleToImage(img, isDual));
+            }
+        });
+    </script>
+</body>
+</html>
